@@ -1,13 +1,11 @@
+const bit<16> ETHERTYPE_IPV4 = 0x0800;
+
+const bit<8> IP_PROTO_TCP = 6;
+const bit<8> IP_PROTO_UDP = 17;
+
 header ethernet_t {
     bit<48> dst;
     bit<48> src;
-    bit<16> eth_type;
-}
-
-header vlan_tag_t {
-    bit<3>  pri;
-    bit<1>  cfi;
-    bit<12> vid;
     bit<16> eth_type;
 }
 
@@ -37,4 +35,41 @@ header tcp_t {
     bit<16> window;
     bit<16> checksum;
     bit<16> urgentPtr;
+}
+
+header udp_t {
+    bit<16> src_port;
+    bit<16> dst_port;
+    bit<16> len;
+    bit<16> checksum;
+}
+
+struct my_headers_t {
+    ethernet_t ethernet;
+    ipv4_t     ipv4;
+    tcp_t      tcp;
+    udp_t      udp;
+}
+
+struct my_ingress_metadata_t {
+    bit<16> flow_index;
+    bit<16> l4_sport;
+    bit<16> l4_dport;
+    bit<1>  is_tcp;
+    bit<1>  is_udp;
+    bit<16> pkt_len;
+    bit<1> f_syn;
+    bit<1> f_ack;
+    bit<1> f_fin;
+    bit<1> f_rst;
+}
+
+struct my_egress_headers_t {
+    ethernet_t ethernet;
+    ipv4_t     ipv4;
+    tcp_t      tcp;
+    udp_t      udp;
+}
+
+struct my_egress_metadata_t {
 }

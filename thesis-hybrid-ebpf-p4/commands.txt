@@ -1,0 +1,119 @@
+1️⃣ Create veths
+sudo /home/ubuntu/open-p4studio/install/bin/veth_setup.sh 128
+2️⃣ Start the Tofino model
+sudo /home/ubuntu/open-p4studio/install/bin/tofino-model
+3️⃣ Start bf_switchd
+sudo /home/ubuntu/open-p4studio/install/bin/bf_switchd \
+  --install-dir /home/ubuntu/open-p4studio/install \
+  --conf-file /home/ubuntu/P4_Code/p4src/basic.tofino/basic.conf
+
+
+After compilation:
+1️⃣  sudo mkdir -p /home/ubuntu/open-p4studio/install/pipe
+sudo cp /home/ubuntu/Desktop/p4_ebpf/thesis-hybrid-ebpf-p4/basic.tofino/pipe/context.json \
+/home/ubuntu/open-p4studio/install/pipe/context.json
+
+sudo cp /home/ubuntu/Desktop/p4_ebpf/thesis-hybrid-ebpf-p4/basic.tofino/pipe/tofino.bin \
+/home/ubuntu/open-p4studio/install/pipe/tofino.bin 
+
+sudo cp /home/ubuntu/Desktop/p4_ebpf/thesis-hybrid-ebpf-p4/basic.tofino/bfrt.json \
+/home/ubuntu/open-p4studio/install/bf-rt.json
+
+2️⃣ create switch conf file => 
+sudo /home/ubuntu/open-p4studio/install/bin/p4c-gen-bfrt-conf \
+  --testdir /home/ubuntu/Desktop/p4_ebpf/thesis-hybrid-ebpf-p4/basic.tofino \
+  --installdir /home/ubuntu/open-p4studio/install \
+  --name basic \
+  --device tofino \
+  --pipe pipe
+
+
+*open bf-shell: /home/ubuntu/open-p4studio/install/bin/bfshell -p 9999
+*clear registers => 
+ing = bfrt.basic.pipe.Ingress
+ing.reg_ack.clear()
+ing.reg_bytes.clear()
+ing.reg_bytes.clear()
+ing.reg_fin.clear()
+ing.reg_pkts.clear()
+ing.reg_rst.clear()
+ing.reg_syn.clear()
+
+*script to get hash_idx:
+python3 - <<'PY'
+import struct
+
+def crc16_ibm_reflected(data: bytes):
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc & 0xFFFF
+
+def ip_to_bytes(ip):
+    return bytes(map(int, ip.split(".")))
+
+src_ip = "10.0.0.1"
+dst_ip = "10.0.0.2"
+src_port = 12345
+dst_port = 443
+protocol = 6  # TCP
+
+data = b""
+data += ip_to_bytes(src_ip)
+data += ip_to_bytes(dst_ip)
+data += struct.pack("!H", src_port)
+data += struct.pack("!H", dst_port)
+data += struct.pack("!B", protocol)
+
+index = crc16_ibm_reflected(data)
+print("flow_index =", index)
+PYpython3 - <<'PY'
+import struct
+
+def crc16_ibm_reflected(data: bytes):
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc & 0xFFFF
+
+def ip_to_bytes(ip):
+    return bytes(map(int, ip.split(".")))
+
+src_ip = "10.0.0.1"
+dst_ip = "10.0.0.2"
+src_port = 12345
+dst_port = 443
+protocol = 6  # TCP
+
+data = b""
+data += ip_to_bytes(src_ip)
+data += ip_to_bytes(dst_ip)
+data += struct.pack("!H", src_port)
+data += struct.pack("!H", dst_port)
+data += struct.pack("!B", protocol)
+
+index = crc16_ibm_reflected(data)
+print("flow_index =", index)
+PY
+
+*script to send SYN packets =>
+sudo python3 - <<'PY'
+from scapy.all import Ether, IP, TCP, sendp
+
+iface = "veth0"   # change if needed
+pkt = Ether()/IP(src="10.0.0.1", dst="10.0.0.2")/TCP(sport=12345, dport=443, flags="S")
+sendp(pkt, iface=iface, count=20, inter=0.05, verbose=False)
+print("sent 20 TCP SYN packets")
+PY
+
+*

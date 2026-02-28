@@ -1,0 +1,16 @@
+# Ignore generated Tofino build output
+basic.tofino/
+
+# Ignore PCAP files and folder
+pcaps/
+*.pcap
+*.pcapng
+
+# Optional: ignore Python cache
+__pycache__/
+*.pyc
+
+# Optional: ignore build artifacts
+*.bfa
+*.bin
+*.json
