@@ -11,9 +11,8 @@ state start {
     meta.flow_index = 16w0;
     meta.l4_sport   = 16w0;
     meta.l4_dport   = 16w0;
-    meta.is_tcp     = 1w0;
-    meta.is_udp     = 1w0;
-
+    meta.iat_valid = 0;
+    meta.cur_iat   = 0;
     transition parse_ethernet;
 }
 
@@ -34,21 +33,17 @@ state start {
         }
     }
 
-    state parse_tcp {
-        pkt.extract(hdr.tcp);
-        meta.is_tcp  = 1w1;
-        meta.is_udp  = 1w0;
-        meta.l4_sport = hdr.tcp.srcPort;
-        meta.l4_dport = hdr.tcp.dstPort;
-        transition accept;
-    }
+state parse_tcp {
+    pkt.extract(hdr.tcp);
+    meta.l4_sport = hdr.tcp.srcPort;
+    meta.l4_dport = hdr.tcp.dstPort;
+    transition accept;
+}
 
-    state parse_udp {
-        pkt.extract(hdr.udp);
-        meta.is_tcp  = 1w0;
-        meta.is_udp  = 1w1;
-        meta.l4_sport = hdr.udp.src_port;
-        meta.l4_dport = hdr.udp.dst_port;
-        transition accept;
-    }
+state parse_udp {
+    pkt.extract(hdr.udp);
+    meta.l4_sport = hdr.udp.src_port;
+    meta.l4_dport = hdr.udp.dst_port;
+    transition accept;
+}
 }

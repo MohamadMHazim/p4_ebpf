@@ -52,16 +52,22 @@ struct my_headers_t {
 }
 
 struct my_ingress_metadata_t {
-    bit<16> flow_index;
+    bit<16> flow_index;   // hash index (for debug if you want)
     bit<16> l4_sport;
     bit<16> l4_dport;
+
     bit<1>  is_tcp;
     bit<1>  is_udp;
-    bit<16> pkt_len;
-    bit<1> f_syn;
-    bit<1> f_ack;
-    bit<1> f_fin;
-    bit<1> f_rst;
+
+    // TCP flags (set in ingress before reg updates)
+    bit<1>  f_syn;
+    bit<1>  f_ack;
+    bit<1>  f_fin;
+    bit<1>  f_rst;
+
+    // IAT helpers (used for reg_iat_min/max/sum logic)
+    bit<1>  iat_valid;
+    bit<32> cur_iat;
 }
 
 struct my_egress_headers_t {

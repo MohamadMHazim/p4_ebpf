@@ -10,28 +10,22 @@ control Ingress(
 {
     Hash<bit<16>>(HashAlgorithm_t.CRC16) crc16_hasher;
 
-    /************** DEBUG: store computed hash index **************/
-Register<bit<16>, bit<1>>(1) reg_dbg_idx;
-
-/* write computed index into reg_dbg_idx[0] */
-RegisterAction<bit<16>, bit<1>, bit<16>>(reg_dbg_idx) dbg_idx_set = {
-    void apply(inout bit<16> v, out bit<16> rv) {
-        v  = meta.flow_index;  // store current flow_index
-        rv = v;
-    }
-};
-
     /*********************** Registers ************************/
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_pkts;
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_bytes;
 
-    // Register<bit<16>, bit<16>>(FLOW_BUCKETS) reg_min_len;
-    // Register<bit<16>, bit<16>>(FLOW_BUCKETS) reg_max_len;
+    // Packet length stats (IPv4 totalLen)
+    Register<bit<16>, bit<16>>(FLOW_BUCKETS) reg_min_len;
+    Register<bit<16>, bit<16>>(FLOW_BUCKETS) reg_max_len;
 
-    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_last_ts;
-    // Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_min;
-    // Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_max;
+    // IAT stats
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_last_ts;   // last timestamp
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_sum;   // sum of deltas
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_cnt;   // number of deltas
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_min;   // min delta (auto-init)
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_max;   // max delta (auto-init)
 
+    // TCP flags
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_syn;
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_ack;
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_fin;
@@ -46,86 +40,95 @@ RegisterAction<bit<16>, bit<1>, bit<16>>(reg_dbg_idx) dbg_idx_set = {
 
     // bytes += ipv4.totalLen
     RegisterAction<bit<32>, bit<16>, bit<32>>(reg_bytes) bytes_add = {
-        void apply(inout bit<32> v) {
+        void apply(inout bit<32> v) { v = v + (bit<32>) hdr.ipv4.totalLen; }
+    };
+
+    // min_len = min(min_len, L) (0 means unset)
+    RegisterAction<bit<16>, bit<16>, bit<16>>(reg_min_len) min_len_update = {
+        void apply(inout bit<16> v) {
             bit<16> L = hdr.ipv4.totalLen;
-            v = v + (bit<32>) L;
+            if (v == 0 || L < v) { v = L; }
         }
     };
 
-    // min_len = min(min_len, L), where 0 means uninitialized
-    // RegisterAction<bit<16>, bit<16>, bit<16>>(reg_min_len) min_update = {
-    //     void apply(inout bit<16> v) {
-    //         bit<16> L = hdr.ipv4.totalLen;
-    //         if (v == 0 || L < v) { v = L; }
-    //     }
-    // };
+    // max_len = max(max_len, L)
+    RegisterAction<bit<16>, bit<16>, bit<16>>(reg_max_len) max_len_update = {
+        void apply(inout bit<16> v) {
+            bit<16> L = hdr.ipv4.totalLen;
+            if (L > v) { v = L; }
+        }
+    };
 
-    // // max_len = max(max_len, L)
-    // RegisterAction<bit<16>, bit<16>, bit<16>>(reg_max_len) max_update = {
-    //     void apply(inout bit<16> v) {
-    //         bit<16> L = hdr.ipv4.totalLen;
-    //         if (L > v) { v = L; }
-    //     }
-    // };
+    // last_ts: read old and write new in same action (TNA: execute() returns old)
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_last_ts) last_ts_rw = {
+        void apply(inout bit<32> v, out bit<32> old) {
+            old = v;
+            v   = (bit<32>) ig_intr_md.ingress_mac_tstamp;
+        }
+    };
 
-    // last_ts update (store now)
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_last_ts) last_ts_set = {
+    // iat_sum += cur_iat
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_sum) iat_sum_add = {
         void apply(inout bit<32> v) {
-            // choose ONE timestamp source; global_tstamp is also available
-            v = (bit<32>) ig_intr_md.ingress_mac_tstamp;
+            if (meta.iat_valid == 1w1) { v = v + meta.cur_iat; }
         }
     };
 
-    // // iat_min update (needs current iat in metadata)
-    // RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_min) iat_min_update = {
-    //     void apply(inout bit<32> v) {
-    //         if (meta.has_iat == 1w1) {
-    //             if (v == 0 || meta.cur_iat < v) { v = meta.cur_iat; }
-    //         }
-    //     }
-    // };
+    // iat_cnt++ but also return old count (so we can init min/max outside)
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_cnt) iat_cnt_rw = {
+        void apply(inout bit<32> v, out bit<32> old) {
+            old = v;
+            if (meta.iat_valid == 1w1) { v = v + 32w1; }
+        }
+    };
 
-    // // iat_max update
-    // RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_max) iat_max_update = {
-    //     void apply(inout bit<32> v) {
-    //         if (meta.has_iat == 1w1) {
-    //             if (meta.cur_iat > v) { v = meta.cur_iat; }
-    //         }
-    //     }
-    // };
+    // iat_min = cur_iat (init)
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_min) iat_min_set = {
+        void apply(inout bit<32> v) { v = meta.cur_iat; }
+    };
 
-    // TCP flags counters (bit<9>)
+    // iat_max = cur_iat (init)
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_max) iat_max_set = {
+        void apply(inout bit<32> v) { v = meta.cur_iat; }
+    };
+
+    // iat_min = min(iat_min, cur_iat)  (2 comparisons only)
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_min) iat_min_update = {
+        void apply(inout bit<32> v) {
+            if (meta.iat_valid == 1w1) {
+                if (meta.cur_iat < v) { v = meta.cur_iat; }
+            }
+        }
+    };
+
+    // iat_max = max(iat_max, cur_iat)
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_max) iat_max_update = {
+        void apply(inout bit<32> v) {
+            if (meta.iat_valid == 1w1) {
+                if (meta.cur_iat > v) { v = meta.cur_iat; }
+            }
+        }
+    };
+
+    // TCP flag counters
     RegisterAction<bit<32>, bit<16>, bit<32>>(reg_syn) syn_update = {
-        void apply(inout bit<32> v) {
-            if (meta.f_syn == 1w1) { v = v + 32w1; }
-        }
+        void apply(inout bit<32> v) { if (meta.f_syn == 1w1) v = v + 32w1; }
     };
-
-    /* ACK++ */
     RegisterAction<bit<32>, bit<16>, bit<32>>(reg_ack) ack_update = {
-        void apply(inout bit<32> v) {
-            if (meta.f_ack == 1w1) { v = v + 32w1; }
-        }
+        void apply(inout bit<32> v) { if (meta.f_ack == 1w1) v = v + 32w1; }
     };
-
-    /* FIN++ */
     RegisterAction<bit<32>, bit<16>, bit<32>>(reg_fin) fin_update = {
-        void apply(inout bit<32> v) {
-            if (meta.f_fin == 1w1) { v = v + 32w1; }
-        }
+        void apply(inout bit<32> v) { if (meta.f_fin == 1w1) v = v + 32w1; }
     };
-
-    /* RST++ */
     RegisterAction<bit<32>, bit<16>, bit<32>>(reg_rst) rst_update = {
-        void apply(inout bit<32> v) {
-            if (meta.f_rst == 1w1) { v = v + 32w1; }
-        }
+        void apply(inout bit<32> v) { if (meta.f_rst == 1w1) v = v + 32w1; }
     };
 
+    /*********************** Forwarding ************************/
     action send_using_port(PortId_t port) {
-    ig_tm_md.ucast_egress_port = port;
-    ig_tm_md.bypass_egress     = 0;
-}
+        ig_tm_md.ucast_egress_port = port;
+        ig_tm_md.bypass_egress     = 0;
+    }
 
     action drop() {
         ig_dprsr_md.drop_ctl       = 3w1;
@@ -138,44 +141,69 @@ RegisterAction<bit<16>, bit<1>, bit<16>>(reg_dbg_idx) dbg_idx_set = {
         const default_action = drop();
         size = 256;
     }
+
     /*********************** Apply ************************/
-apply {
-    if (hdr.ipv4.isValid()) {
-
-        bit<16> idx = crc16_hasher.get({
-            hdr.ipv4.srcAddr,
-            hdr.ipv4.dstAddr,
-            meta.l4_sport,
-            meta.l4_dport,
-            hdr.ipv4.protocol
-        });
-
-        meta.flow_index = idx;
-
-        // ✅ store computed index into reg_dbg_idx[0]
-        dbg_idx_set.execute(0);
-
-        // real counters at computed idx
-        pkts_add.execute(idx);
-        bytes_add.execute(idx);
-
-        // (optional) TCP flags
+    apply {
+        // init flags + iat state
         meta.f_syn = 1w0; meta.f_ack = 1w0; meta.f_fin = 1w0; meta.f_rst = 1w0;
+        meta.iat_valid = 1w0;
+        meta.cur_iat   = 32w0;
 
-        if (hdr.tcp.isValid()) {
-            bit<9> f = hdr.tcp.flags;
-            if ((f & 9w0x002) != 0) { meta.f_syn = 1w1; }
-            if ((f & 9w0x010) != 0) { meta.f_ack = 1w1; }
-            if ((f & 9w0x001) != 0) { meta.f_fin = 1w1; }
-            if ((f & 9w0x004) != 0) { meta.f_rst = 1w1; }
+        if (hdr.ipv4.isValid()) {
+            bit<16> idx = crc16_hasher.get({
+                hdr.ipv4.srcAddr,
+                hdr.ipv4.dstAddr,
+                meta.l4_sport,
+                meta.l4_dport,
+                hdr.ipv4.protocol
+            });
+            meta.flow_index = idx;
 
-            syn_update.execute(idx);
-            ack_update.execute(idx);
-            fin_update.execute(idx);
-            rst_update.execute(idx);
+            // basic stats
+            pkts_add.execute(idx);
+            bytes_add.execute(idx);
+            min_len_update.execute(idx);
+            max_len_update.execute(idx);
+
+            // IAT: get old timestamp and update last_ts
+            bit<32> now_ts = (bit<32>) ig_intr_md.ingress_mac_tstamp;
+            bit<32> old_ts = last_ts_rw.execute(idx);
+
+            if (old_ts != 0) {
+                meta.iat_valid = 1w1;
+                meta.cur_iat   = now_ts - old_ts;
+
+                // update sum first (uses meta.cur_iat)
+                iat_sum_add.execute(idx);
+
+                // increment cnt and fetch old count for init logic
+                bit<32> old_cnt = iat_cnt_rw.execute(idx);
+
+                // first valid delta => init min/max to this delta
+                if (old_cnt == 0) {
+                    iat_min_set.execute(idx);
+                    iat_max_set.execute(idx);
+                } else {
+                    iat_min_update.execute(idx);
+                    iat_max_update.execute(idx);
+                }
+            }
+
+            // TCP flags
+            if (hdr.tcp.isValid()) {
+                bit<9> f = hdr.tcp.flags;
+                if ((f & 9w0x002) != 0) { meta.f_syn = 1w1; }
+                if ((f & 9w0x010) != 0) { meta.f_ack = 1w1; }
+                if ((f & 9w0x001) != 0) { meta.f_fin = 1w1; }
+                if ((f & 9w0x004) != 0) { meta.f_rst = 1w1; }
+
+                syn_update.execute(idx);
+                ack_update.execute(idx);
+                fin_update.execute(idx);
+                rst_update.execute(idx);
+            }
         }
-    }
 
-    forwarding.apply();
-}
+        forwarding.apply();
+    }
 }
