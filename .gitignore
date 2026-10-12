@@ -2,8 +2,11 @@
 __pycache__/
 *.py[cod]
 
-# Local dependency checkout
-/libbpf-bootstrap/
+# Vendored libbpf-bootstrap build outputs
+/libbpf-bootstrap/examples/c/.output/
+/libbpf-bootstrap/examples/c/execmon
+/libbpf-bootstrap/examples/c/filemon
+/libbpf-bootstrap/examples/c/hostmon
 
 # Generated host monitoring outputs
 /benign_ls_clean.csv
