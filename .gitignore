@@ -1,0 +1,22 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local dependency checkout
+/libbpf-bootstrap/
+
+# Generated host monitoring outputs
+/benign_ls_clean.csv
+/process_summary.csv
+/ctu13_s13_peak10.csv
+/synthetic_testers.csv
+/hybrid_labels.csv
+/hybrid_windows.csv
+/indexes_unique.txt
+/hybrid_dataset_workdir/
+
+# Local captures and test artifacts
+*.log
+/test_ebpf_logs/
+/veth_sw_ext
+/veth_sw_int

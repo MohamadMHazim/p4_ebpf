@@ -1,0 +1,7 @@
+{
+  "PortToIf": [
+    { "device_port": 0, "if": "veth1" },
+    { "device_port": 1, "if": "veth3" },
+    { "device_port": 2, "if": "veth5" }
+  ]
+}

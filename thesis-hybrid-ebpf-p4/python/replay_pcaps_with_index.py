@@ -3,15 +3,17 @@ import argparse
 import struct
 import time
 import socket
+import ipaddress
 from scapy.all import rdpcap, sendp, Ether, IP, TCP, UDP
 
-# ----- CRC16 (CRC-16/ARC) with reflection (matches your Tofino CRC16 style) -----
+
 def reflect_bits(val: int, width: int) -> int:
     res = 0
     for _ in range(width):
         res = (res << 1) | (val & 1)
         val >>= 1
     return res
+
 
 def crc16_tofino(data: bytes) -> int:
     POLY = 0x8005
@@ -26,62 +28,80 @@ def crc16_tofino(data: bytes) -> int:
                 crc = (crc << 1) & 0xFFFF
     return reflect_bits(crc, 16)
 
-def ip_to_bytes(ip: str) -> bytes:
-    # safer than split(".")
-    return socket.inet_aton(ip)
 
-def compute_flow_index_single_hash(src_ip: str, dst_ip: str, sport: int, dport: int, proto: int) -> int:
-    """
-    MATCHES YOUR NEW P4:
-      idx = crc16({ srcIP, dstIP, sport, dport, proto })
-    """
+def ip_to_u32(ip: str) -> int:
+    return struct.unpack("!I", socket.inet_aton(ip))[0]
+
+
+def u32_to_bytes(x: int) -> bytes:
+    return struct.pack("!I", x & 0xFFFFFFFF)
+
+
+def u16_to_bytes(x: int) -> bytes:
+    return struct.pack("!H", x & 0xFFFF)
+
+
+def compute_flow_index_symmetric(src_ip: str, dst_ip: str, sport: int, dport: int, proto: int) -> int:
+    sip = ip_to_u32(src_ip)
+    dip = ip_to_u32(dst_ip)
+
+    ip_x = (sip ^ dip) & 0xFFFFFFFF
+    ip_s = (sip + dip) & 0xFFFFFFFF
+
+    sp = sport & 0xFFFF
+    dp = dport & 0xFFFF
+    p_x = (sp ^ dp) & 0xFFFF
+    p_s = (sp + dp) & 0xFFFF
+
     blob = b"".join([
-        ip_to_bytes(src_ip),
-        ip_to_bytes(dst_ip),
-        struct.pack("!H", sport),
-        struct.pack("!H", dport),
-        struct.pack("!B", proto),
+        u32_to_bytes(ip_x),
+        u32_to_bytes(ip_s),
+        u16_to_bytes(p_x),
+        u16_to_bytes(p_s),
+        struct.pack("!B", proto & 0xFF),
     ])
     return crc16_tofino(blob)
 
+
 def extract_5tuple(pkt):
-    """Return (src_ip, dst_ip, sport, dport, proto) for IPv4 TCP/UDP, else None."""
     if IP not in pkt:
         return None
     ip = pkt[IP]
-
     if TCP in pkt:
         t = pkt[TCP]
         return (ip.src, ip.dst, int(t.sport), int(t.dport), 6)
-
     if UDP in pkt:
         u = pkt[UDP]
         return (ip.src, ip.dst, int(u.sport), int(u.dport), 17)
-
     return None
 
+
 def ensure_ether(pkt):
-    """If pcap packet doesn't have Ether header, wrap it."""
-    if Ether in pkt:
-        return pkt
-    return Ether() / pkt
+    return pkt if Ether in pkt else (Ether() / pkt)
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pcap", required=True, help="Path to .pcap/.pcapng")
-    ap.add_argument("--iface", default="veth0")
-    ap.add_argument("--limit", type=int, default=0, help="0 = all packets, else replay first N")
-    ap.add_argument("--interval", type=float, default=0.0, help="seconds between packets")
-    ap.add_argument("--index-file", default="indexes.txt", help="file to save per-packet indexes")
-    ap.add_argument("--unique-only", action="store_true", help="save only unique indexes (order preserved)")
+    ap.add_argument("--pcap", required=True)
+    ap.add_argument("--int-iface", default="veth1")
+    ap.add_argument("--ext-iface", default="veth3")
+    ap.add_argument("--internal-cidr", default="172.16.11.0/24")
+    ap.add_argument("--limit", type=int, default=0, help="0=all, else first N packets")
+    ap.add_argument("--interval", type=float, default=0.0)
+    ap.add_argument("--index-file", default="indexes_unique.txt")
+    ap.add_argument("--unique-only", action="store_true")
     args = ap.parse_args()
+
+    internal_net = ipaddress.ip_network(args.internal_cidr, strict=False)
 
     pkts = rdpcap(args.pcap)
     total = len(pkts)
     n = total if args.limit == 0 else min(args.limit, total)
 
-    print(f"Loaded {total} packets from {args.pcap}")
-    print(f"Replaying {n} packets on {args.iface}\n")
+    print(f"\nLoaded {total} packets from {args.pcap}")
+    print(f"Replaying {n} packets with split injection:")
+    print(f"  internal src in {internal_net} -> {args.int_iface}")
+    print(f"  external src               -> {args.ext_iface}\n")
 
     seen = set()
     indexes_out = []
@@ -90,19 +110,25 @@ def main():
         pkt = ensure_ether(pkts[i])
         tup = extract_5tuple(pkt)
 
-        # send the packet
-        sendp(pkt, iface=args.iface, count=1, verbose=False)
-
         if tup is None:
-            print(f"[{i+1}/{n}] Non IPv4 TCP/UDP -> sent (no index)")
+            sendp(pkt, iface=args.int_iface, count=1, verbose=False)
             if not args.unique_only:
                 indexes_out.append("NA")
+            if args.interval > 0:
+                time.sleep(args.interval)
             continue
 
         src, dst, sport, dport, proto = tup
-        idx = compute_flow_index_single_hash(src, dst, sport, dport, proto)
+        idx = compute_flow_index_symmetric(src, dst, sport, dport, proto)
 
-        print(f"[{i+1}/{n}] {src}:{sport}->{dst}:{dport} proto={proto}  idx={idx}")
+        try:
+            src_ip = ipaddress.ip_address(src)
+            iface = args.int_iface if (src_ip in internal_net) else args.ext_iface
+        except Exception:
+            iface = args.int_iface
+
+        sendp(pkt, iface=iface, count=1, verbose=False)
+        print(f"[{i+1}/{n}] via {iface:11s} {src}:{sport}->{dst}:{dport} proto={proto} idx={idx}")
 
         if args.unique_only:
             if idx not in seen:
@@ -118,16 +144,16 @@ def main():
         for x in indexes_out:
             f.write(f"{x}\n")
 
-    if args.unique_only:
-        print(f"\nDone. Saved {len(indexes_out)} unique indexes to {args.index_file}")
-    else:
-        print(f"\nDone. Saved {len(indexes_out)} per-packet indexes to {args.index_file}")
+    print(f"\nDone. Saved {len(indexes_out)} {'unique ' if args.unique_only else ''}indexes to {args.index_file}")
+
 
 if __name__ == "__main__":
     main()
 
 # sudo python3 replay_pcaps_with_index.py \
 #   --pcap /home/ubuntu/Desktop/p4_ebpf/thesis-hybrid-ebpf-p4/pcaps/test.pcap \
-#   --iface veth0 --limit 150 \
-#   --unique-only \
+#   --internal-cidr 172.16.11.0/24 \
+#   --int-iface veth0 \
+#   --ext-iface veth2 \
+#   --limit 150 --unique-only \
 #   --index-file /home/ubuntu/Desktop/p4_ebpf/thesis-hybrid-ebpf-p4/python/indexes_unique.txt

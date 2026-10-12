@@ -10,121 +10,152 @@ control Ingress(
 {
     Hash<bit<16>>(HashAlgorithm_t.CRC16) crc16_hasher;
 
-    /*********************** Registers ************************/
+    /* -------- Core per-flow primitives kept in data plane -------- */
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_pkts;
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_bytes;
 
-    // Packet length stats (IPv4 totalLen)
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_pkts_ab;
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_bytes_ab;
+
+    Register<bit<16>, bit<16>>(FLOW_BUCKETS) reg_ref_src_port;
+    Register<bit<16>, bit<16>>(FLOW_BUCKETS) reg_ref_dst_port;
+    Register<bit<8>,  bit<16>>(FLOW_BUCKETS) reg_dir_valid;
+
     Register<bit<16>, bit<16>>(FLOW_BUCKETS) reg_min_len;
     Register<bit<16>, bit<16>>(FLOW_BUCKETS) reg_max_len;
 
-    // IAT stats
-    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_last_ts;   // last timestamp
-    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_sum;   // sum of deltas
-    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_cnt;   // number of deltas
-    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_min;   // min delta (auto-init)
-    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_iat_max;   // max delta (auto-init)
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_first_ts;
+    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_last_ts;
 
-    // TCP flags
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_syn;
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_ack;
-    Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_fin;
     Register<bit<32>, bit<16>>(FLOW_BUCKETS) reg_rst;
 
-    /*********************** RegisterActions ************************/
-
-    // packets++
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_pkts) pkts_add = {
-        void apply(inout bit<32> v) { v = v + 32w1; }
+    /* -------- Counter updates -------- */
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_pkts) pkts_rw = {
+        void apply(inout bit<32> v, out bit<32> old) {
+            old = v;
+            v = v + 32w1;
+        }
     };
 
-    // bytes += ipv4.totalLen
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_bytes) bytes_add = {
-        void apply(inout bit<32> v) { v = v + (bit<32>) hdr.ipv4.totalLen; }
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_bytes) bytes_rw = {
+        void apply(inout bit<32> v, out bit<32> old) {
+            old = v;
+            v = v + (bit<32>) meta.pkt_len;
+        }
     };
 
-    // min_len = min(min_len, L) (0 means unset)
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_pkts_ab) pkts_ab_update = {
+        void apply(inout bit<32> v, out bit<32> old) {
+            old = v;
+            if (meta.dir_ab == 1w1) {
+                v = v + 32w1;
+            }
+        }
+    };
+
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_bytes_ab) bytes_ab_update = {
+        void apply(inout bit<32> v, out bit<32> old) {
+            old = v;
+            if (meta.dir_ab == 1w1) {
+                v = v + (bit<32>) meta.pkt_len;
+            }
+        }
+    };
+
+    /* -------- Direction reference -------- */
+    RegisterAction<bit<8>, bit<16>, bit<8>>(reg_dir_valid) dir_valid_rw = {
+        void apply(inout bit<8> v, out bit<8> old) {
+            old = v;
+            if (v == 8w0) {
+                v = 8w1;
+            }
+        }
+    };
+
+    RegisterAction<bit<16>, bit<16>, bit<16>>(reg_ref_src_port) ref_src_set = {
+        void apply(inout bit<16> v) {
+            v = meta.l4_sport;
+        }
+    };
+
+    RegisterAction<bit<16>, bit<16>, bit<16>>(reg_ref_dst_port) ref_dst_set = {
+        void apply(inout bit<16> v) {
+            v = meta.l4_dport;
+        }
+    };
+
+    RegisterAction<bit<16>, bit<16>, bit<16>>(reg_ref_src_port) ref_src_read = {
+        void apply(inout bit<16> v, out bit<16> old) {
+            old = v;
+        }
+    };
+
+    RegisterAction<bit<16>, bit<16>, bit<16>>(reg_ref_dst_port) ref_dst_read = {
+        void apply(inout bit<16> v, out bit<16> old) {
+            old = v;
+        }
+    };
+
+    /* -------- Packet length min/max -------- */
     RegisterAction<bit<16>, bit<16>, bit<16>>(reg_min_len) min_len_update = {
         void apply(inout bit<16> v) {
-            bit<16> L = hdr.ipv4.totalLen;
-            if (v == 0 || L < v) { v = L; }
+            bit<16> L = meta.pkt_len;
+            if (v == 0 || L < v) {
+                v = L;
+            }
         }
     };
 
-    // max_len = max(max_len, L)
     RegisterAction<bit<16>, bit<16>, bit<16>>(reg_max_len) max_len_update = {
         void apply(inout bit<16> v) {
-            bit<16> L = hdr.ipv4.totalLen;
-            if (L > v) { v = L; }
+            bit<16> L = meta.pkt_len;
+            if (L > v) {
+                v = L;
+            }
         }
     };
 
-    // last_ts: read old and write new in same action (TNA: execute() returns old)
+    /* -------- Timestamps -------- */
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_first_ts) first_ts_set_if0 = {
+        void apply(inout bit<32> v) {
+            if (v == 0) {
+                v = (bit<32>) ig_intr_md.ingress_mac_tstamp;
+            }
+        }
+    };
+
     RegisterAction<bit<32>, bit<16>, bit<32>>(reg_last_ts) last_ts_rw = {
         void apply(inout bit<32> v, out bit<32> old) {
             old = v;
-            v   = (bit<32>) ig_intr_md.ingress_mac_tstamp;
+            v = (bit<32>) ig_intr_md.ingress_mac_tstamp;
         }
     };
 
-    // iat_sum += cur_iat
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_sum) iat_sum_add = {
-        void apply(inout bit<32> v) {
-            if (meta.iat_valid == 1w1) { v = v + meta.cur_iat; }
-        }
-    };
-
-    // iat_cnt++ but also return old count (so we can init min/max outside)
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_cnt) iat_cnt_rw = {
+    /* -------- TCP flag counters -------- */
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_syn) syn_inc = {
         void apply(inout bit<32> v, out bit<32> old) {
             old = v;
-            if (meta.iat_valid == 1w1) { v = v + 32w1; }
+            v = v + 32w1;
         }
     };
 
-    // iat_min = cur_iat (init)
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_min) iat_min_set = {
-        void apply(inout bit<32> v) { v = meta.cur_iat; }
-    };
-
-    // iat_max = cur_iat (init)
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_max) iat_max_set = {
-        void apply(inout bit<32> v) { v = meta.cur_iat; }
-    };
-
-    // iat_min = min(iat_min, cur_iat)  (2 comparisons only)
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_min) iat_min_update = {
-        void apply(inout bit<32> v) {
-            if (meta.iat_valid == 1w1) {
-                if (meta.cur_iat < v) { v = meta.cur_iat; }
-            }
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_ack) ack_inc = {
+        void apply(inout bit<32> v, out bit<32> old) {
+            old = v;
+            v = v + 32w1;
         }
     };
 
-    // iat_max = max(iat_max, cur_iat)
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_iat_max) iat_max_update = {
-        void apply(inout bit<32> v) {
-            if (meta.iat_valid == 1w1) {
-                if (meta.cur_iat > v) { v = meta.cur_iat; }
-            }
+    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_rst) rst_inc = {
+        void apply(inout bit<32> v, out bit<32> old) {
+            old = v;
+            v = v + 32w1;
         }
     };
 
-    // TCP flag counters
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_syn) syn_update = {
-        void apply(inout bit<32> v) { if (meta.f_syn == 1w1) v = v + 32w1; }
-    };
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_ack) ack_update = {
-        void apply(inout bit<32> v) { if (meta.f_ack == 1w1) v = v + 32w1; }
-    };
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_fin) fin_update = {
-        void apply(inout bit<32> v) { if (meta.f_fin == 1w1) v = v + 32w1; }
-    };
-    RegisterAction<bit<32>, bit<16>, bit<32>>(reg_rst) rst_update = {
-        void apply(inout bit<32> v) { if (meta.f_rst == 1w1) v = v + 32w1; }
-    };
-
-    /*********************** Forwarding ************************/
+    /* -------- Forwarding -------- */
     action send_using_port(PortId_t port) {
         ig_tm_md.ucast_egress_port = port;
         ig_tm_md.bypass_egress     = 0;
@@ -136,74 +167,143 @@ control Ingress(
     }
 
     table forwarding {
-        key = { ig_intr_md.ingress_port : exact; }
-        actions = { send_using_port; drop; }
+        key = {
+            ig_intr_md.ingress_port : exact;
+        }
+        actions = {
+            send_using_port;
+            drop;
+        }
         const default_action = drop();
         size = 256;
     }
 
-    /*********************** Apply ************************/
     apply {
-        // init flags + iat state
-        meta.f_syn = 1w0; meta.f_ack = 1w0; meta.f_fin = 1w0; meta.f_rst = 1w0;
-        meta.iat_valid = 1w0;
-        meta.cur_iat   = 32w0;
+        meta.dir_ab = 1w1;
 
-        if (hdr.ipv4.isValid()) {
-            bit<16> idx = crc16_hasher.get({
-                hdr.ipv4.srcAddr,
-                hdr.ipv4.dstAddr,
-                meta.l4_sport,
-                meta.l4_dport,
-                hdr.ipv4.protocol
-            });
+        ig_dprsr_md.mirror_type = 0;
+
+        meta.cpu_mirror_sid       = 0;
+        meta.cpu_report.magic     = 16w0;
+        meta.cpu_report.src_ip    = 32w0;
+        meta.cpu_report.dst_ip    = 32w0;
+        meta.cpu_report.src_port  = 16w0;
+        meta.cpu_report.dst_port  = 16w0;
+        meta.cpu_report.proto     = 8w0;
+        meta.cpu_report.reason    = 8w0;
+
+        if (hdr.ipv4.isValid() && (hdr.tcp.isValid() || hdr.udp.isValid())) {
+            bit<32> sip = hdr.ipv4.srcAddr;
+            bit<32> dip = hdr.ipv4.dstAddr;
+            bit<16> sp  = meta.l4_sport;
+            bit<16> dp  = meta.l4_dport;
+            bit<8>  pr  = hdr.ipv4.protocol;
+
+            bit<32> ip_x = sip ^ dip;
+            bit<32> ip_s = sip + dip;
+            bit<16> p_x  = sp ^ dp;
+            bit<16> p_s  = sp + dp;
+
+            bit<16> idx = crc16_hasher.get({ ip_x, ip_s, p_x, p_s, pr });
             meta.flow_index = idx;
 
-            // basic stats
-            pkts_add.execute(idx);
-            bytes_add.execute(idx);
-            min_len_update.execute(idx);
-            max_len_update.execute(idx);
+            bit<8>  dir_old_valid = dir_valid_rw.execute(idx);
+            bit<16> ref_sp = 16w0;
+            bit<16> ref_dp = 16w0;
 
-            // IAT: get old timestamp and update last_ts
-            bit<32> now_ts = (bit<32>) ig_intr_md.ingress_mac_tstamp;
-            bit<32> old_ts = last_ts_rw.execute(idx);
+            if (dir_old_valid == 8w0) {
+                ref_src_set.execute(idx);
+                ref_dst_set.execute(idx);
+                meta.dir_ab = 1w1;
 
-            if (old_ts != 0) {
-                meta.iat_valid = 1w1;
-                meta.cur_iat   = now_ts - old_ts;
+                /* First-seen flow report to CPU */
+                meta.cpu_report.magic     = 16w0xBEEF;
+                meta.cpu_report.src_ip    = sip;
+                meta.cpu_report.dst_ip    = dip;
+                meta.cpu_report.src_port  = sp;
+                meta.cpu_report.dst_port  = dp;
+                meta.cpu_report.proto     = pr;
+                meta.cpu_report.reason    = 8w1;
 
-                // update sum first (uses meta.cur_iat)
-                iat_sum_add.execute(idx);
+                meta.cpu_mirror_sid       = 1;
+                ig_dprsr_md.mirror_type   = FLOW_REPORT_MIRROR;
+            } else {
+                ref_sp = ref_src_read.execute(idx);
+                ref_dp = ref_dst_read.execute(idx);
 
-                // increment cnt and fetch old count for init logic
-                bit<32> old_cnt = iat_cnt_rw.execute(idx);
-
-                // first valid delta => init min/max to this delta
-                if (old_cnt == 0) {
-                    iat_min_set.execute(idx);
-                    iat_max_set.execute(idx);
+                if ((sp == ref_sp) && (dp == ref_dp)) {
+                    meta.dir_ab = 1w1;
+                } else if ((sp == ref_dp) && (dp == ref_sp)) {
+                    meta.dir_ab = 1w0;
                 } else {
-                    iat_min_update.execute(idx);
-                    iat_max_update.execute(idx);
+                    /* Collision / ambiguity fallback */
+                    meta.dir_ab = 1w1;
                 }
             }
 
-            // TCP flags
+            /* Core counters */
+            pkts_ab_update.execute(idx);
+            bytes_ab_update.execute(idx);
+
+            pkts_rw.execute(idx);
+            bytes_rw.execute(idx);
+
+            min_len_update.execute(idx);
+            max_len_update.execute(idx);
+
+            first_ts_set_if0.execute(idx);
+            last_ts_rw.execute(idx);
+
+            /* TCP flags */
             if (hdr.tcp.isValid()) {
                 bit<9> f = hdr.tcp.flags;
-                if ((f & 9w0x002) != 0) { meta.f_syn = 1w1; }
-                if ((f & 9w0x010) != 0) { meta.f_ack = 1w1; }
-                if ((f & 9w0x001) != 0) { meta.f_fin = 1w1; }
-                if ((f & 9w0x004) != 0) { meta.f_rst = 1w1; }
 
-                syn_update.execute(idx);
-                ack_update.execute(idx);
-                fin_update.execute(idx);
-                rst_update.execute(idx);
+                if ((f & 9w0x002) != 0) {
+                    syn_inc.execute(idx);
+                }
+                if ((f & 9w0x004) != 0) {
+                    rst_inc.execute(idx);
+                }
+                if ((f & 9w0x010) != 0) {
+                    ack_inc.execute(idx);
+                }
             }
         }
 
         forwarding.apply();
     }
 }
+
+/*
+Off-switch features to compute from this reduced P4 collector:
+
+Raw primitives exported / readable per flow bucket:
+- pkts_total        = reg_pkts
+- bytes_total       = reg_bytes
+- pkts_ab           = reg_pkts_ab
+- bytes_ab          = reg_bytes_ab
+- min_len           = reg_min_len
+- max_len           = reg_max_len
+- first_ts          = reg_first_ts
+- last_ts           = reg_last_ts
+- syn_count         = reg_syn
+- ack_count         = reg_ack
+- rst_count         = reg_rst
+
+Derived off-switch features:
+- pkts_ba           = pkts_total - pkts_ab
+- bytes_ba          = bytes_total - bytes_ab
+- flow_duration     = last_ts - first_ts
+- down_up_ratio     = bytes_ba / bytes_ab              (guard divide-by-zero)
+- avg_pkt_size      = bytes_total / pkts_total         (guard divide-by-zero)
+- avg_pkt_size_ab   = bytes_ab / pkts_ab               (guard divide-by-zero)
+- avg_pkt_size_ba   = bytes_ba / pkts_ba               (guard divide-by-zero)
+- bytes_per_sec     = bytes_total / flow_duration      (guard divide-by-zero)
+- pkts_per_sec      = pkts_total / flow_duration       (guard divide-by-zero)
+
+Recommended final hybrid-network feature families:
+- volume            : pkts_total, bytes_total, pkts_ab, bytes_ab, pkts_ba, bytes_ba
+- size              : min_len, max_len, avg_pkt_size
+- timing            : flow_duration, bytes_per_sec, pkts_per_sec
+- tcp_behavior      : syn_count, ack_count, rst_count
+*/

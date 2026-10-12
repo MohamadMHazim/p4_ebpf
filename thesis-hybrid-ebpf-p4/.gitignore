@@ -5,6 +5,7 @@ basic.tofino/
 pcaps/
 *.pcap
 *.pcapng
+/hybrid_windows.csv
 
 # Optional: ignore Python cache
 __pycache__/
@@ -13,4 +14,3 @@ __pycache__/
 # Optional: ignore build artifacts
 *.bfa
 *.bin
-*.json

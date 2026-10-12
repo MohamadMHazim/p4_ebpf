@@ -3,6 +3,8 @@ const bit<16> ETHERTYPE_IPV4 = 0x0800;
 const bit<8> IP_PROTO_TCP = 6;
 const bit<8> IP_PROTO_UDP = 17;
 
+const MirrorType_t FLOW_REPORT_MIRROR = 1;
+
 header ethernet_t {
     bit<48> dst;
     bit<48> src;
@@ -44,6 +46,17 @@ header udp_t {
     bit<16> checksum;
 }
 
+/* Report payload mirrored to CPU/host */
+struct cpu_report_t {
+    bit<16> magic;
+    bit<32> src_ip;
+    bit<32> dst_ip;
+    bit<16> src_port;
+    bit<16> dst_port;
+    bit<8>  proto;
+    bit<8>  reason;
+}
+
 struct my_headers_t {
     ethernet_t ethernet;
     ipv4_t     ipv4;
@@ -52,22 +65,34 @@ struct my_headers_t {
 }
 
 struct my_ingress_metadata_t {
-    bit<16> flow_index;   // hash index (for debug if you want)
+    bit<16> flow_index;
+
     bit<16> l4_sport;
     bit<16> l4_dport;
 
-    bit<1>  is_tcp;
-    bit<1>  is_udp;
-
-    // TCP flags (set in ingress before reg updates)
     bit<1>  f_syn;
     bit<1>  f_ack;
     bit<1>  f_fin;
     bit<1>  f_rst;
 
-    // IAT helpers (used for reg_iat_min/max/sum logic)
     bit<1>  iat_valid;
     bit<32> cur_iat;
+
+    bit<1>  do_report;
+
+    bit<16> pkt_len;
+
+    bit<1>  len_bad;
+    bit<1>  syn_noack;
+
+    bit<8>  rule_mask;
+    bit<1>  tcp_dport_allowed;
+    bit<1>  udp_dport_allowed;
+    bit<1>  dir_ab;
+    bit<1>  from_internal;
+
+    MirrorId_t  cpu_mirror_sid;
+    cpu_report_t cpu_report;
 }
 
 struct my_egress_headers_t {
