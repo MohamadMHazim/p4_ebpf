@@ -4,6 +4,16 @@ This repository combines a libbpf host monitor with a Tofino P4 pipeline. The
 hybrid collector samples host activity and P4 flow counters in synchronized
 time windows and writes them to a CSV file.
 
+## Related Repositories
+
+- [Thesis and research overview](https://github.com/mohamadhazimm/a-unified-p4-ebpf-architecture-for-host-and-network-malware-detection)
+	documents the architecture, evaluation context, and written research.
+- [Malware Dataset Construction Study](https://github.com/mohamadhazimm/p4_ebpf-dataset-construction)
+	contains the isolated collection and network/host/hybrid model pipeline.
+
+These repositories are maintained and released independently. The dataset
+study README links back here and to the thesis.
+
 ## Requirements
 
 - Linux with a working eBPF-capable kernel and root access.
