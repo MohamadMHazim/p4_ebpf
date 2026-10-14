@@ -527,9 +527,8 @@ def build_net_summaries(
             pkts_ab = get_row_int(row, "pkts_ab", 0)
             bytes_ab = get_row_int(row, "bytes_ab", 0)
 
-            # If reader does not export ba directly, derive it
-            pkts_ba = get_row_int(row, "pkts_ba", max(0, pkts - pkts_ab))
-            bytes_ba = get_row_int(row, "bytes_ba", max(0, bytes_total - bytes_ab))
+            pkts_ba = max(0, pkts - pkts_ab)
+            bytes_ba = max(0, bytes_total - bytes_ab)
 
             syn = get_row_int(row, "syn", 0)
             ack = get_row_int(row, "ack", 0)
